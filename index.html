@@ -1,0 +1,323 @@
+
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hệ thống báo cháy gia đình</title>
+
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: Arial, sans-serif;
+      background: #f1f5f9;
+      color: #1e293b;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: auto;
+    }
+
+    h1 {
+      text-align: center;
+      color: #b91c1c;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      text-align: center;
+      color: #64748b;
+      margin-bottom: 25px;
+    }
+
+    .status {
+      text-align: center;
+      margin-bottom: 20px;
+      font-weight: bold;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 18px;
+    }
+
+    .card {
+      background: white;
+      padding: 22px;
+      border-radius: 14px;
+      box-shadow: 0 3px 12px #00000012;
+    }
+
+    .card h2 {
+      margin-top: 0;
+      font-size: 19px;
+    }
+
+    .value {
+      font-size: 34px;
+      font-weight: bold;
+      margin: 15px 0;
+    }
+
+    .gas { color: #dc2626; }
+    .temp { color: #2563eb; }
+
+    .chart-card {
+      grid-column: span 2;
+      height: 300px;
+    }
+
+    .control-card {
+      text-align: center;
+    }
+
+    .buttons {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    button {
+      border: none;
+      border-radius: 8px;
+      padding: 12px 20px;
+      color: white;
+      font-size: 15px;
+      font-weight: bold;
+      cursor: pointer;
+    }
+
+    button:active { transform: scale(.97); }
+
+    .on { background: #16a34a; }
+    .off { background: #dc2626; }
+    .auto { background: #2563eb; }
+
+    .message {
+      margin-top: 12px;
+      color: #64748b;
+      font-size: 14px;
+    }
+
+    @media (max-width: 650px) {
+      .grid { grid-template-columns: 1fr; }
+      .chart-card { grid-column: span 1; }
+    }
+  </style>
+</head>
+
+<body>
+<div class="container">
+
+  <h1>HỆ THỐNG BÁO CHÁY GIA ĐÌNH</h1>
+  <p class="subtitle">Giám sát khí gas và nhiệt độ qua MQTT</p>
+
+  <div class="status" id="mqttStatus">
+    Đang kết nối MQTT...
+  </div>
+
+  <div class="grid">
+
+    <div class="card">
+      <h2>Nồng độ khí gas (MQ2)</h2>
+      <div class="value gas" id="gasValue">--</div>
+      <p>Ngưỡng cảnh báo: 2000</p>
+    </div>
+
+    <div class="card">
+      <h2>Nhiệt độ (DS18B20)</h2>
+      <div class="value temp" id="tempValue">-- °C</div>
+      <p>Ngưỡng cảnh báo: 50 °C</p>
+    </div>
+
+    <div class="card chart-card">
+      <h2>Biểu đồ nồng độ khí gas</h2>
+      <canvas id="gasChart"></canvas>
+    </div>
+
+    <div class="card chart-card">
+      <h2>Biểu đồ nhiệt độ</h2>
+      <canvas id="tempChart"></canvas>
+    </div>
+
+    <div class="card control-card">
+      <h2>Điều khiển quạt</h2>
+      <p>Chế độ hoạt động của quạt thông gió</p>
+      <div class="buttons">
+        <button class="on" onclick="sendCommand('fan','ON')">BẬT</button>
+        <button class="off" onclick="sendCommand('fan','OFF')">TẮT</button>
+        <button class="auto" onclick="sendCommand('fan','AUTO')">TỰ ĐỘNG</button>
+      </div>
+      <div class="message" id="fanMessage">Chưa gửi lệnh</div>
+    </div>
+
+    <div class="card control-card">
+      <h2>Điều khiển bơm</h2>
+      <p>Chế độ hoạt động của bơm nước</p>
+      <div class="buttons">
+        <button class="on" onclick="sendCommand('pump','ON')">BẬT</button>
+        <button class="off" onclick="sendCommand('pump','OFF')">TẮT</button>
+        <button class="auto" onclick="sendCommand('pump','AUTO')">TỰ ĐỘNG</button>
+      </div>
+      <div class="message" id="pumpMessage">Chưa gửi lệnh</div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+  // Kết nối MQTT qua WebSocket
+  const broker = "wss://broker.hivemq.com:8884/mqtt";
+
+  const dataTopic = "firealarm/demo01/data";
+  const fanTopic = "firealarm/demo01/control/fan";
+  const pumpTopic = "firealarm/demo01/control/pump";
+
+  const client = mqtt.connect(broker, {
+    clientId: "Web_FireAlarm_" + Math.random().toString(16).substring(2, 10),
+    clean: true,
+    connectTimeout: 10000,
+    reconnectPeriod: 3000
+  });
+
+  const statusElement = document.getElementById("mqttStatus");
+
+  client.on("connect", function () {
+    statusElement.textContent = "MQTT: Đã kết nối";
+    statusElement.style.color = "#16a34a";
+
+    client.subscribe(dataTopic, function (err) {
+      if (err) {
+        statusElement.textContent = "Lỗi đăng ký topic dữ liệu";
+        statusElement.style.color = "#dc2626";
+      }
+    });
+  });
+
+  client.on("reconnect", function () {
+    statusElement.textContent = "Đang kết nối lại MQTT...";
+    statusElement.style.color = "#d97706";
+  });
+
+  client.on("error", function (error) {
+    statusElement.textContent = "Lỗi MQTT: " + error.message;
+    statusElement.style.color = "#dc2626";
+  });
+
+  // Nhận dữ liệu ESP32 gửi lên
+  client.on("message", function (topic, message) {
+    if (topic === dataTopic) {
+      try {
+        const data = JSON.parse(message.toString());
+
+        const gas = Number(data.gas);
+        const temperature = Number(data.temperature);
+
+        if (!Number.isFinite(gas) || !Number.isFinite(temperature)) return;
+
+        document.getElementById("gasValue").textContent = gas;
+        document.getElementById("tempValue").textContent =
+          temperature.toFixed(2) + " °C";
+
+        updateCharts(gas, temperature);
+      } catch (error) {
+        console.log("Lỗi đọc dữ liệu:", error);
+      }
+    }
+  });
+
+  // Gửi lệnh điều khiển quạt và bơm
+  function sendCommand(device, command) {
+    if (!client.connected) {
+      alert("MQTT chưa kết nối! Vui lòng thử lại.");
+      return;
+    }
+
+    const topic = device === "fan" ? fanTopic : pumpTopic;
+
+    client.publish(topic, command, { qos: 0 }, function (error) {
+      const messageElement = document.getElementById(device + "Message");
+
+      if (error) {
+        messageElement.textContent = "Gửi lệnh thất bại!";
+      } else {
+        messageElement.textContent = "Đã gửi lệnh: " + command;
+      }
+    });
+  }
+
+  // Khởi tạo biểu đồ
+  const labels = [];
+  const gasData = [];
+  const tempData = [];
+
+  const gasChart = new Chart(
+    document.getElementById("gasChart"),
+    {
+      type: "line",
+      data: {
+        labels: labels,
+        datasets: [{
+          label: "Khí gas",
+          data: gasData,
+          borderColor: "#dc2626",
+          tension: 0.3
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false
+      }
+    }
+  );
+
+  const tempChart = new Chart(
+    document.getElementById("tempChart"),
+    {
+      type: "line",
+      data: {
+        labels: labels,
+        datasets: [{
+          label: "Nhiệt độ (°C)",
+          data: tempData,
+          borderColor: "#2563eb",
+          tension: 0.3
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false
+      }
+    }
+  );
+
+  function updateCharts(gas, temperature) {
+    const time = new Date().toLocaleTimeString();
+
+    labels.push(time);
+    gasData.push(gas);
+    tempData.push(temperature);
+
+    if (labels.length > 20) {
+      labels.shift();
+      gasData.shift();
+      tempData.shift();
+    }
+
+    gasChart.update();
+    tempChart.update();
+  }
+</script>
+
+</body>
+</html>
